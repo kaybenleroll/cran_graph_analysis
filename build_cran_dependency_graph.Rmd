@@ -1,0 +1,144 @@
+---
+title: "Network Analysis of CRAN Package Dependencies"
+author: "Mick Cooney <mickcooney@gmail.com>"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_caption: yes
+    number_sections: yes
+    theme: spacelab #cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      smooth_scroll: FALSE
+  pdf_document: default
+---
+
+```{r knit_opts, include = FALSE}
+rm(list = ls())
+
+library(conflicted)
+library(tidyverse)
+library(scales)
+library(purrr)
+library(cowplot)
+library(glue)
+
+conflict_prefer('select',  'dplyr')
+conflict_prefer('filter',  'dplyr')
+conflict_prefer('lag',     'dplyr')
+
+
+options(
+  width = 80L,
+  warn  = 1
+  )
+
+knitr::opts_chunk$set(
+  tidy        = FALSE,
+  cache       = FALSE,
+  warning     = FALSE,
+  message     = FALSE,
+  fig.height  =     7,
+  fig.width   =    11
+  )
+
+
+set.seed(42)
+```
+
+# Construct Dependency Graph
+
+## Load CRAN Package Data
+
+```{r retrieve_package_data, echo=TRUE, eval=TRUE}
+file_name <- Sys.Date() %>% format('%Y%m%d') %>% paste0('cran_', ., '_deps.rds')
+
+available.packages() %>%
+  as_tibble() %>%
+  write_rds(file = glue("data/{file_name}"))
+```
+
+We load the data into a dependency table.
+
+```{r load_package_data, echo=TRUE}
+cran_pkg_tbl <- glue("data/{file_name}") %>% read_rds()
+
+cran_pkg_tbl %>% glimpse()
+```
+
+
+## Construct Depends Graph
+
+We now construct the graph of all packages looking solely at the `Depends`
+packages for now. Packages are provided in a comma-separated string, so some
+parsing is required.
+
+```{r parse_depends_fields, echo=TRUE}
+construct_edges <- function(pkg_tbl, pkg_col) {
+  pkg_col <- enquo(pkg_col)
+  
+  edges_tbl <- pkg_tbl %>%
+    mutate(
+      pkgs = str_split(!! pkg_col, ', *'),
+      deps = map(pkgs, enframe, name = NULL)
+      ) %>%
+    select(Package, deps) %>%
+    unnest(deps) %>%
+    mutate(
+      pkg_depends = gsub(' *\\(.*\\)', '', value) %>% gsub('\\n', '', .),
+      pkg_depends = if_else(pkg_depends == '', NA_character_, pkg_depends),
+      type        = quo_name(pkg_col)
+      ) %>%
+    filter(
+      pkg_depends != 'R', !is.na(pkg_depends)
+      )
+
+  return(edges_tbl)
+}
+
+depends_tbl <- construct_edges(cran_pkg_tbl, Depends)
+imports_tbl <- construct_edges(cran_pkg_tbl, Imports)
+
+edgelist_tbl <- list(
+    Depends = depends_tbl,
+    Imports = imports_tbl
+    ) %>%
+  bind_rows()
+```
+
+An alternative way of doing this without the use of meta-programming ideas from
+`tidyeval` is to use `tidyr` instead.
+
+
+```{r construct_edgelist, echo=TRUE}
+node_tbl <- cran_pkg_tbl %>%
+  select(Package, NeedsCompilation)
+
+edge_tbl <- cran_pkg_tbl %>%
+  select(Package, Depends, Imports, Enhances, Suggests) %>%
+  pivot_longer(
+    !Package,
+    names_to  = "type",
+    values_to = "entry"
+    ) %>%
+  mutate(
+    pkgs = str_split(entry, ', *'),
+    deps = map(pkgs, enframe)
+    ) %>%
+  unnest(deps) %>%
+  mutate(
+    pkg_depends = gsub(' *\\(.*\\)', '', value) %>% gsub('\\n', '', .),
+    pkg_depends = if_else(pkg_depends == '', NA_character_, pkg_depends)
+    ) %>%
+  filter(
+    pkg_depends != 'R', !is.na(pkg_depends)
+    ) %>%
+  select(type, Package, pkg_depends) %>%
+  arrange(type, Package, pkg_depends)
+    
+
+node_tbl %>% glimpse
+edge_tbl %>% glimpse
+```
+
